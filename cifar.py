@@ -34,7 +34,7 @@ def get_cifar10(args, root):
         ])
     base_dataset = datasets.CIFAR10(root, train=True, download=False)
 
-    train_labeled_idxs, train_unlabeled_idxs= x_u_split(
+    train_labeled_idxs, train_unlabeled_idxs, valid_idxs= my_x_u_split(
         args, base_dataset.targets)
 
     train_labeled_dataset = CIFAR10SSL(
@@ -46,10 +46,13 @@ def get_cifar10(args, root):
         transform=moco.loader.TwoCropsTransform(cidar10transform)
     )
 
+    valid_dataset = CIFAR10SSL(
+        root, valid_idxs, train=True, transform=cidar10transform)
+
     test_dataset = datasets.CIFAR10(
         root, train=False, transform=cidar10transform, download=False)
 
-    return train_labeled_dataset, train_unlabeled_dataset, test_dataset
+    return train_labeled_dataset, train_unlabeled_dataset, valid_dataset, test_dataset
 
 
 def x_u_split(args, labels, num_labeled=4000, num_classes=10, eval_step=1024):
@@ -65,16 +68,35 @@ def x_u_split(args, labels, num_labeled=4000, num_classes=10, eval_step=1024):
     labeled_idx = np.array(labeled_idx)
     assert len(labeled_idx) == num_labeled
 
-    # for i in range(num_classes):
-    #     idx = np.where(labels == i)[0]
-    #     idx = np.random.choice(idx, label_per_class, False)
-    #     valid_idx.extend(idx)
-    # valid_idx = np.array(valid_idx)
-    # unlabeled_idx = np.delete(unlabeled_idx, valid_idx)
-
     np.random.shuffle(labeled_idx)
     unlabeled_idx = np.delete(unlabeled_idx, labeled_idx)
     return labeled_idx, unlabeled_idx
+
+def my_x_u_split(args, labels, num_labeled=4000, num_classes=10, eval_step=1024):
+    label_per_class = num_labeled // num_classes
+    labels = np.array(labels)
+    temp_idx = np.zeros(len(labels))
+    labeled_idx = []
+    # unlabeled data: all data (https://github.com/kekmodel/FixMatch-pytorch/issues/10)
+    unlabeled_idx = np.array(range(len(labels)))
+    for i in range(num_classes):
+        idx = np.where(labels == i)[0]
+        idx = np.random.choice(idx, label_per_class, False)
+        labeled_idx.extend(idx)
+    labeled_idx = np.array(labeled_idx)
+    assert len(labeled_idx) == num_labeled
+    temp_idx[labeled_idx] = 1
+
+    valid_idx = []
+    for i in range(num_classes):
+        idx = np.where(temp_idx[labels == i] == 0)[0]
+        idx = np.random.choice(idx, label_per_class, False)
+        valid_idx.extend(idx)
+    valid_idx = np.array(valid_idx)
+
+    np.random.shuffle(labeled_idx)
+    unlabeled_idx = np.delete(unlabeled_idx, valid_idx)
+    return labeled_idx, unlabeled_idx, valid_idx
 
 class CIFAR10SSL(datasets.CIFAR10):
     def __init__(self, root, indexs, train=True,

@@ -269,9 +269,9 @@ def main_worker(gpu, ngpus_per_node, args):
     #     download=True
     # )
 
-    labeled_dataset, unlabeled_dataset, test_dataset = cifar.get_cifar10(args=args, root='datasets')
+    labeled_dataset, unlabeled_dataset, valid_dataset, test_dataset = cifar.get_cifar10(args=args, root='datasets')
 
-    labeled_dataset, valid_dataset = torch.utils.data.random_split(labeled_dataset, [len(labeled_dataset)//2, len(labeled_dataset)//2])
+    # labeled_dataset, valid_dataset = torch.utils.data.random_split(labeled_dataset, [len(labeled_dataset)//2, len(labeled_dataset)//2])
 
     # if args.distributed:
     #     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
