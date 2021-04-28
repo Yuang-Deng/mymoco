@@ -78,7 +78,7 @@ parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
 parser.add_argument('--gpu', default=0, type=int,
                     help='GPU id to use.')
-parser.add_argument('--eval-step', default=512, type=int,
+parser.add_argument('--eval-step', default=256, type=int,
                     help='number of eval steps to run')
 parser.add_argument('--multiprocessing-distributed', action='store_true',
                     help='Use multi-processing distributed training to launch '
@@ -226,8 +226,8 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # Data loading code
     # traindir = os.path.join(args.data, 'train')
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
+    # normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+    #                                  std=[0.229, 0.224, 0.225])
     # if args.aug_plus:
     #     # MoCo v2's aug: similar to SimCLR https://arxiv.org/abs/2002.05709
     #     augmentation = [
@@ -269,7 +269,9 @@ def main_worker(gpu, ngpus_per_node, args):
     #     download=True
     # )
 
-    labeled_dataset, unlabeled_dataset, valid_dataset, test_dataset = cifar.get_cifar10(args=args, root='datasets')
+    labeled_dataset, unlabeled_dataset, test_dataset = cifar.get_cifar10(args=args, root='datasets')
+
+    labeled_dataset, valid_dataset = torch.utils.data.random_split(labeled_dataset, [len(labeled_dataset)//2, len(labeled_dataset)//2])
 
     # if args.distributed:
     #     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -278,19 +280,19 @@ def main_worker(gpu, ngpus_per_node, args):
 
     labeled_train_loader = torch.utils.data.DataLoader(
         labeled_dataset, batch_size=args.batch_size,
-        pin_memory=True, drop_last=True, num_workers=args.workers,)
+        pin_memory=True, drop_last=True, num_workers=args.workers)
 
     unlabeled_train_loader = torch.utils.data.DataLoader(
         unlabeled_dataset, batch_size=args.batch_size,
-        pin_memory=True, drop_last=True, num_workers=args.workers,)
+        pin_memory=True, drop_last=True, num_workers=args.workers)
 
     valid_loader = torch.utils.data.DataLoader(
         valid_dataset, batch_size=args.batch_size,
-        pin_memory=True, drop_last=True, num_workers=args.workers, )
+        pin_memory=True, drop_last=True, num_workers=args.workers)
 
     test_loader = torch.utils.data.DataLoader(
         test_dataset, batch_size=args.batch_size,
-        pin_memory=True, drop_last=True, num_workers=args.workers,)
+        pin_memory=True, drop_last=True, num_workers=args.workers)
 
     for epoch in range(args.start_epoch, args.epochs):
         # if args.distributed:
@@ -310,7 +312,7 @@ def main_worker(gpu, ngpus_per_node, args):
             }, is_best=False, filename='checkpoint_{:04d}.pth.tar'.format(epoch))
         modeltest(args, valid_loader, model, lx, "valid")
 
-    modeltest(args, test_loader, model, lx, "test")
+    # modeltest(args, test_loader, model, lx, "test")
 
 def modeltest(args, test_loader, model, lx, stage):
     batch_time = AverageMeter('Time', ':6.3f')

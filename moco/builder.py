@@ -116,13 +116,6 @@ class MoCo(nn.Module):
     #     return x_gather[idx_this]
 
     def forward(self, im_labeled, im_q=None, im_k=None):
-        """
-        Input:
-            im_q: a batch of query images
-            im_k: a batch of key images
-        Output:
-            logits, targets
-        """
         if self.training:
             # compute query features
             q = self.encoder_q(im_q)  # queries: NxC
