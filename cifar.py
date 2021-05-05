@@ -19,7 +19,14 @@ normal_mean = (0.5, 0.5, 0.5)
 normal_std = (0.5, 0.5, 0.5)
 
 
-def get_cifar10(args, root):
+def get_cifar10(args, root, num_labeled):
+    simpleTransform = transforms.Compose([
+        transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
+        transforms.RandomRotation(45, resample=False, expand=False, center=None),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225])
+    ])
     cidar10transform = transforms.Compose([
             transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
             transforms.RandomApply([
@@ -35,11 +42,11 @@ def get_cifar10(args, root):
     base_dataset = datasets.CIFAR10(root, train=True, download=False)
 
     train_labeled_idxs, train_unlabeled_idxs, valid_idxs= my_x_u_split(
-        args, base_dataset.targets)
+        args, base_dataset.targets, num_labeled=num_labeled)
 
     train_labeled_dataset = CIFAR10SSL(
         root, train_labeled_idxs, train=True,
-        transform=cidar10transform)
+        transform=simpleTransform)
 
     train_unlabeled_dataset = CIFAR10SSL(
         root, train_unlabeled_idxs, train=True,
@@ -47,10 +54,10 @@ def get_cifar10(args, root):
     )
 
     valid_dataset = CIFAR10SSL(
-        root, valid_idxs, train=True, transform=cidar10transform)
+        root, valid_idxs, train=True, transform=simpleTransform)
 
     test_dataset = datasets.CIFAR10(
-        root, train=False, transform=cidar10transform, download=False)
+        root, train=False, transform=simpleTransform, download=False)
 
     return train_labeled_dataset, train_unlabeled_dataset, valid_dataset, test_dataset
 
