@@ -8,6 +8,7 @@ import random
 import shutil
 import time
 import warnings
+from collections import OrderedDict
 
 import torch
 import torch.nn as nn
@@ -23,18 +24,34 @@ import torchvision.models as models
 
 import moco.loader
 import moco.builder
+from moco.wrn import Network
 import cifar
 
-lamdactv = 2
+lamdactv = 4
 lamdapseudo = 1
-mu_batch = 5
-lrate = 0.1
-batch_size = 36
+mu_batch = 6
+lrate = 7e-2
+batch_size = 128
 epochs = 200
-eval_step = 250
-moco_k = 100 * batch_size
-threshold = 0.95
+eval_step = 80
+moco_k = mu_batch * 80 * batch_size
+threshold = 0.9
 num_labeled = 4000
+valid_num = 5000
+momentum = 0.9
+weight_decay = 0
+moco_m = 0.999
+# resume = 'checkpoint_0290.pth.tar'
+resume = ''
+model_config = OrderedDict([
+    ('arch', 'wrn'),
+    ('depth', 28),
+    ('base_channels', 16),
+    ('widening_factor', 2),
+    ('drop_rate', 0.3),
+    ('input_shape', (1, 3, 32, 32)),
+    ('n_classes', 128),
+])
 
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
@@ -70,7 +87,7 @@ parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
                     dest='weight_decay')
 parser.add_argument('-p', '--print-freq', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
-parser.add_argument('--resume', default='', type=str, metavar='PATH',
+parser.add_argument('--resume', default='checkpoint_0290.pth.tar', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
 parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
@@ -80,7 +97,7 @@ parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
                     help='url used to set up distributed training')
 parser.add_argument('--dist-backend', default='nccl', type=str,
                     help='distributed backend')
-parser.add_argument('--seed', default=None, type=int,
+parser.add_argument('--seed', default=1, type=int,
                     help='seed for initializing training. ')
 parser.add_argument('--gpu', default=0, type=int,
                     help='GPU id to use.')
@@ -154,9 +171,10 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # create model
     print("=> creating model '{}'".format(args.arch))
+    # wrn_28_2 = Network(model_config)
     model = moco.builder.MoCo(
-        models.__dict__[args.arch],
-        args.moco_dim, moco_k, args.moco_m, args.moco_t, args.mlp)
+        Network, model_config,
+        moco_k, moco_m, args.moco_t, args.mlp)
     print(model)
 
     if args.gpu is not None:
@@ -168,50 +186,52 @@ def main_worker(gpu, ngpus_per_node, args):
     lx = nn.CrossEntropyLoss().cuda(args.gpu)
 
     optimizer = torch.optim.SGD(model.parameters(), lrate,
-                                momentum=args.momentum,
-                                weight_decay=args.weight_decay)
+                                momentum=momentum,
+                                weight_decay=weight_decay)
+
+    schedular = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs, 0, -1)
 
     # optionally resume from a checkpoint
-    if args.resume:
-        if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
+    if resume:
+        if os.path.isfile(resume):
+            print("=> loading checkpoint '{}'".format(resume))
             if args.gpu is None:
-                checkpoint = torch.load(args.resume)
+                checkpoint = torch.load(resume)
             else:
                 # Map model to be loaded to specified single gpu.
                 loc = 'cuda:{}'.format(args.gpu)
-                checkpoint = torch.load(args.resume, map_location=loc)
+                checkpoint = torch.load(resume, map_location=loc)
             args.start_epoch = checkpoint['epoch']
             model.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
+                  .format(resume, checkpoint['epoch']))
         else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
+            print("=> no checkpoint found at '{}'".format(resume))
 
     cudnn.benchmark = True
 
-    labeled_dataset, unlabeled_dataset, valid_dataset, test_dataset = cifar.get_cifar10(args=args, root='datasets', num_labeled=num_labeled)
+    labeled_dataset, unlabeled_dataset, valid_dataset, test_dataset = cifar.get_cifar10(args=args, root='datasets',
+                                                                                        num_labeled=num_labeled,
+                                                                                        valid_num=valid_num)
 
     labeled_train_loader = torch.utils.data.DataLoader(
-        labeled_dataset, batch_size=batch_size,
+        labeled_dataset, batch_size=batch_size, shuffle=True,
         pin_memory=True, drop_last=True, num_workers=args.workers)
 
     unlabeled_train_loader = torch.utils.data.DataLoader(
-        unlabeled_dataset, batch_size=batch_size * mu_batch,
+        unlabeled_dataset, batch_size=batch_size * mu_batch, shuffle=True,
         pin_memory=True, drop_last=True, num_workers=args.workers)
 
     valid_loader = torch.utils.data.DataLoader(
-        valid_dataset, batch_size=batch_size,
+        valid_dataset, batch_size=batch_size, shuffle=True,
         pin_memory=True, drop_last=True, num_workers=args.workers)
 
     test_loader = torch.utils.data.DataLoader(
-        test_dataset, batch_size=batch_size,
+        test_dataset, batch_size=batch_size, shuffle=True,
         pin_memory=True, drop_last=True, num_workers=args.workers)
 
     for epoch in range(args.start_epoch, epochs):
-        # if args.distributed:
-        #     train_sampler.set_epoch(epoch)
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
@@ -223,7 +243,7 @@ def main_worker(gpu, ngpus_per_node, args):
             'state_dict': model.state_dict(),
             'optimizer': optimizer.state_dict(),
         }, is_best=False, filename='checkpoint_{:04d}.pth.tar'.format(epoch))
-        modeltest(args, valid_loader, model, lx, "valid")
+        modeltest(args, valid_loader, model, lx, "val")
 
     # modeltest(args, test_loader, model, lx, "test")
 
@@ -276,21 +296,24 @@ def train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, op
     model.train()
 
     end = time.time()
-    labeled_iter = iter(labeled_train_loader)
-    unlabeled_iter = iter(unlabeled_train_loader)
+    # labeled_iter = iter(labeled_train_loader)
+    labeled_iter = labeled_train_loader.__iter__()
+    unlabeled_iter = unlabeled_train_loader.__iter__()
     for i in range(eval_step):
         # measure data loading time
         data_time.update(time.time() - end)
         try:
             inputs_x, targets_x = labeled_iter.next()
         except:
-            labeled_iter = iter(labeled_train_loader)
+            # print("label over")
+            labeled_iter = labeled_train_loader.__iter__()
             inputs_x, targets_x = labeled_iter.next()
 
         try:
             images, _ = unlabeled_iter.next()
         except:
-            unlabeled_iter = iter(unlabeled_train_loader)
+            # print("unlabel over")
+            unlabeled_iter = unlabeled_train_loader.__iter__()
             images, _ = unlabeled_iter.next()
 
         if args.gpu is not None:
@@ -298,15 +321,21 @@ def train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, op
             targets_x = targets_x.cuda(args.gpu, non_blocking=True)
             images[0] = images[0].cuda(args.gpu, non_blocking=True)
             images[1] = images[1].cuda(args.gpu, non_blocking=True)
+            images[2] = images[2].cuda(args.gpu, non_blocking=True)
 
         # compute output
-        output, target, classout, q_predict, k_predict = model(im_labeled=inputs_x, im_q=images[0], im_k=images[1])
+        output, target, classout, q_predict, p_predict = model(im_labeled=inputs_x, im_q=images[0], im_k=images[1],
+                                                               im_plabel=images[2])
 
         # pseudo_label = torch.softmax(q_predict.detach(), dim=-1)
-        max_probs, target_q = torch.max(q_predict, dim=-1)
+        max_probs, target_q = torch.max(p_predict.detach(), dim=-1)
         mask = max_probs.ge(threshold).float()
         loss = lx(classout, targets_x.long()) + lamdactv * criterion(output, target) + lamdapseudo * (
-                F.cross_entropy(k_predict, target_q, reduction='none') * mask).mean()
+                F.cross_entropy(q_predict, target_q, reduction='none') * mask).mean()
+        # print("lx:"+str(lx(classout, targets_x.long())))
+        # print("ctv:"+str(lamdactv * criterion(output, target)))
+        # print("pse:"+str(lamdapseudo * (F.cross_entropy(q_predict, target_q, reduction='none') * mask).mean()))
+        # print("loss:"+str(loss))
 
         # acc1/acc5 are (K+1)-way contrast classifier accuracy
         # measure accuracy and record loss

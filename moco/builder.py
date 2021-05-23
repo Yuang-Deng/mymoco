@@ -9,7 +9,7 @@ class MoCo(nn.Module):
     https://arxiv.org/abs/1911.05722
     """
 
-    def __init__(self, base_encoder, dim=128, K=65536, m=0.999, T=0.07, mlp=False):
+    def __init__(self, base_encoder, encoder_config, K=65536, m=0.999, T=0.07, mlp=False):
         """
         dim: feature dimension (default: 128)
         K: queue size; number of negative keys (default: 65536)
@@ -22,33 +22,23 @@ class MoCo(nn.Module):
         self.m = m
         self.T = T
 
-        self.classifier = nn.Sequential()
-        self.classifier.add_module('d_ln1', nn.Linear(2048, 10))
-        self.classifier.add_module('d_softmax', nn.Softmax(dim=1))
-        # create the encoders
-        # num_classes is the output fc dimension
-        self.encoder_q = base_encoder(num_classes=dim)
-        self.encoder_k = base_encoder(num_classes=dim)
-        # self.encoder_q_fc = self.encoder_q.fc
-        # self.encoder_k_fc = self.encoder_k.fc
-        # self.encoder_q.fc = nn.Sequential()
-        # self.encoder_k.fc = nn.Sequential()
+        self.encoder_q = base_encoder(encoder_config)
+        self.encoder_k = base_encoder(encoder_config)
 
-        # if mlp:  # hack: brute-force replacement
-        #     dim_mlp = self.encoder_q.fc.weight.shape[1]
-        #     self.encoder_q.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_q.fc)
-        #     self.encoder_k.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_k.fc)
+        dim_mlp = self.encoder_q.feature_size
+        self.encoder_q.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_q.fc)
+        self.encoder_k.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_k.fc)
+
+        self.classifier = nn.Sequential()
+        self.classifier.add_module('d_ln1', nn.Linear(self.encoder_q.feature_size, 10))
+        self.classifier.add_module('d_softmax', nn.Softmax(dim=1))
 
         for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
             param_k.data.copy_(param_q.data)  # initialize
             param_k.requires_grad = False  # not update by gradient
 
-        # for param_q, param_k in zip(self.encoder_q_fc.parameters(), self.encoder_k_fc.parameters()):
-        #     param_k.data.copy_(param_q.data)  # initialize
-        #     param_k.requires_grad = False  # not update by gradient
-
         # create the queue
-        self.register_buffer("queue", torch.randn(dim, K))
+        self.register_buffer("queue", torch.randn(encoder_config['n_classes'], K))
         self.queue = nn.functional.normalize(self.queue, dim=0)
 
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
@@ -60,8 +50,6 @@ class MoCo(nn.Module):
         """
         for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
             param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
-        # for param_q, param_k in zip(self.encoder_q_fc.parameters(), self.encoder_k_fc.parameters()):
-        #     param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
 
     @torch.no_grad()
     def _dequeue_and_enqueue(self, keys):
@@ -79,30 +67,33 @@ class MoCo(nn.Module):
 
         self.queue_ptr[0] = ptr
 
-    def forward(self, im_labeled, im_q=None, im_k=None):
+    def forward(self, im_labeled, im_q=None, im_k=None, im_plabel=None):
         if self.training:
-            # compute query features
-            # q, _ = modelforward(self.encoder_q, im_q)
-            # q = self.encoder_q(im_q)  # queries: NxC
-            # q = nn.functional.normalize(q, dim=1)
+            # imgs = torch.cat([im_labeled, im_q, im_plabel], dim=0)
+            imgs = torch.cat([im_labeled, im_q, im_plabel], dim=0)
+            imgs = self.encoder_q.forward_conv(imgs)
+            imgs = imgs.view(imgs.size(0), -1)
+            feature = imgs[:im_labeled.size(0)]
+            q, plabel = torch.split(imgs[im_labeled.size(0):], im_q.size(0))
 
-            q = modelforward(self.encoder_q, im_q)
+            # q = self.encoder_q.forward_conv(im_q)
+            # q = q.view(q.size(0), -1)
             q_predict = self.classifier(q)
             q = self.encoder_q.fc(q)
             q = nn.functional.normalize(q, dim=1)
 
-            feature = modelforward(self.encoder_q, im_labeled)  # queries: NxC
+            # plabel = self.encoder_q.forward_conv(im_plabel)
+            # plabel = plabel.view(plabel.size(0), -1)
+            p_predict = self.classifier(plabel)
 
+            # feature = self.encoder_q.forward_conv(im_labeled)  # queries: NxC
+            # feature = feature.view(feature.size(0), -1)
             classout = self.classifier(feature)
 
             with torch.no_grad():
                 self._momentum_update_key_encoder()
-                # k = self.encoder_k(im_k)  # keys: NxC
-                # k = nn.functional.normalize(k, dim=1)
 
-                k = modelforward(self.encoder_k, im_k)
-                k_predict = self.classifier(k)
-                k = self.encoder_k.fc(k)
+                k = self.encoder_k(im_k)
                 k = nn.functional.normalize(k, dim=1)
 
             l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
@@ -121,25 +112,9 @@ class MoCo(nn.Module):
             # dequeue and enqueue
             self._dequeue_and_enqueue(k)
 
-            return logits, labels, classout, q_predict, k_predict
+            return logits, labels, classout, q_predict, p_predict
         else:
-            labeled = modelforward(self.encoder_q, im_labeled)  # queries: NxC
-            labeled = nn.functional.normalize(labeled, dim=1)
+            labeled = self.encoder_q.forward_conv(im_labeled)  # queries: NxC
+            labeled = labeled.view(labeled.size(0), -1)
             classout = self.classifier(labeled)
             return classout
-
-
-def modelforward(model, x):
-    x = model.conv1(x)
-    x = model.bn1(x)
-    x = model.relu(x)
-    x = model.maxpool(x)
-
-    x = model.layer1(x)
-    x = model.layer2(x)
-    x = model.layer3(x)
-    x = model.layer4(x)
-
-    x = model.avgpool(x)
-    x = x.view(x.shape[0], -1)
-    return x

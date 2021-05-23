@@ -19,16 +19,19 @@ normal_mean = (0.5, 0.5, 0.5)
 normal_std = (0.5, 0.5, 0.5)
 
 
-def get_cifar10(args, root, num_labeled):
+def get_cifar10(args, root, num_labeled, valid_num):
     simpleTransform = transforms.Compose([
-        transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
-        transforms.RandomRotation(45, resample=False, expand=False, center=None),
+        # transforms.RandomRotation(45, resample=False, expand=False, center=None),
+        # transforms.ToTensor(),
+        # transforms.Normalize(mean=cifar10_mean,
+        #                      std=cifar10_std)
+        transforms.Resize((32, 32)),
+        # transforms.RandomCrop(border=4, cropsize=(32, 32)),
+        transforms.RandomHorizontalFlip(p=0.5),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225])
+        transforms.Normalize(cifar10_mean, cifar10_std),
     ])
     cidar10transform = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
             transforms.RandomApply([
                 transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
             ], p=0.8),
@@ -36,13 +39,39 @@ def get_cifar10(args, root, num_labeled):
             transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                std=[0.229, 0.224, 0.225])
+            transforms.Normalize(mean=cifar10_mean,
+                                std=cifar10_std)
         ])
+    # trans_weak = transforms.Compose([
+    #     transforms.Resize((32, 32)),
+    #     transforms.PadandRandomCrop(border=4, cropsize=(32, 32)),
+    #     transforms.RandomHorizontalFlip(p=0.5),
+    #     transforms.Normalize(mean, std),
+    #     transforms.ToTensor(),
+    # ])
+    # trans_strong0 = transforms.Compose([
+    #     transforms.Resize((32, 32)),
+    #     transforms.PadandRandomCrop(border=4, cropsize=(32, 32)),
+    #     transforms.RandomHorizontalFlip(p=0.5),
+    #     RandomAugment(2, 10),
+    #     transforms.Normalize(mean, std),
+    #     transforms.ToTensor(),
+    # ])
+    # trans_strong1 = transforms.Compose([
+    #     transforms.ToPILImage(),
+    #     transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
+    #     transforms.RandomHorizontalFlip(p=0.5),
+    #     transforms.RandomApply([
+    #         transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
+    #     ], p=0.8),
+    #     transforms.RandomGrayscale(p=0.2),
+    #     transforms.ToTensor(),
+    #     transforms.Normalize(mean, std),
+    # ])
     base_dataset = datasets.CIFAR10(root, train=True, download=False)
 
     train_labeled_idxs, train_unlabeled_idxs, valid_idxs= my_x_u_split(
-        args, base_dataset.targets, num_labeled=num_labeled)
+        args, base_dataset.targets, num_labeled=num_labeled, valid_num=valid_num)
 
     train_labeled_dataset = CIFAR10SSL(
         root, train_labeled_idxs, train=True,
@@ -50,7 +79,7 @@ def get_cifar10(args, root, num_labeled):
 
     train_unlabeled_dataset = CIFAR10SSL(
         root, train_unlabeled_idxs, train=True,
-        transform=moco.loader.TwoCropsTransform(cidar10transform)
+        transform=moco.loader.ThreeCropsTransform(cidar10transform, simpleTransform)
     )
 
     valid_dataset = CIFAR10SSL(
@@ -79,7 +108,7 @@ def x_u_split(args, labels, num_labeled=4000, num_classes=10, eval_step=1024):
     unlabeled_idx = np.delete(unlabeled_idx, labeled_idx)
     return labeled_idx, unlabeled_idx
 
-def my_x_u_split(args, labels, num_labeled=4000, num_classes=10, eval_step=1024):
+def my_x_u_split(args, labels, num_labeled=4000, valid_num = 5000, num_classes=10, eval_step=1024):
     label_per_class = num_labeled // num_classes
     labels = np.array(labels)
     temp_idx = np.zeros(len(labels))
@@ -95,6 +124,7 @@ def my_x_u_split(args, labels, num_labeled=4000, num_classes=10, eval_step=1024)
     temp_idx[labeled_idx] = 1
 
     valid_idx = []
+    label_per_class = valid_num // num_classes
     for i in range(num_classes):
         idx = np.where(temp_idx[labels == i] == 0)[0]
         idx = np.random.choice(idx, label_per_class, False)
