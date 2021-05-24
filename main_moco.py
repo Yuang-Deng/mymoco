@@ -27,17 +27,17 @@ import moco.builder
 from moco.wrn import Network
 import cifar
 
-lamdactv = 4
+lamdactv = 3
 lamdapseudo = 1
-mu_batch = 6
-lrate = 7e-2
+mu_batch = 8
+lrate = 1e-1
 batch_size = 128
 epochs = 200
 eval_step = 80
-moco_k = mu_batch * 80 * batch_size
-threshold = 0.9
+moco_k = mu_batch * 100 * batch_size
+threshold = 0.99
 num_labeled = 4000
-valid_num = 5000
+valid_num = 6000
 momentum = 0.9
 weight_decay = 0
 moco_m = 0.999
@@ -185,11 +185,18 @@ def main_worker(gpu, ngpus_per_node, args):
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
     lx = nn.CrossEntropyLoss().cuda(args.gpu)
 
-    optimizer = torch.optim.SGD(model.parameters(), lrate,
+    feature_optimizer = torch.optim.SGD(model.encoder_q.parameters(), lrate,
                                 momentum=momentum,
                                 weight_decay=weight_decay)
+    classfier_optimizer = torch.optim.SGD(model.classifier.parameters(), lrate,
+                                    momentum=momentum,
+                                    weight_decay=weight_decay)
+    res_optimizer = torch.optim.SGD(model.encoder_qfc.parameters(), lrate,
+                                    momentum=momentum,
+                                    weight_decay=weight_decay)
 
-    schedular = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs, 0, -1)
+
+    # schedular = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs, 0, -1)
 
     # optionally resume from a checkpoint
     if resume:
@@ -203,7 +210,9 @@ def main_worker(gpu, ngpus_per_node, args):
                 checkpoint = torch.load(resume, map_location=loc)
             args.start_epoch = checkpoint['epoch']
             model.load_state_dict(checkpoint['state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
+            feature_optimizer.load_state_dict(checkpoint['feature_optimizer'])
+            classfier_optimizer.load_state_dict(checkpoint['classfier_optimizer'])
+            res_optimizer.load_state_dict(checkpoint['res_optimizer'])
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(resume, checkpoint['epoch']))
         else:
@@ -232,16 +241,20 @@ def main_worker(gpu, ngpus_per_node, args):
         pin_memory=True, drop_last=True, num_workers=args.workers)
 
     for epoch in range(args.start_epoch, epochs):
-        adjust_learning_rate(optimizer, epoch, args)
+        adjust_learning_rate(feature_optimizer, epoch, args)
+        adjust_learning_rate(classfier_optimizer, epoch, args)
+        adjust_learning_rate(res_optimizer, epoch, args)
 
         # train for one epoch
-        train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, optimizer, epoch, args)
+        train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, feature_optimizer, classfier_optimizer, res_optimizer, epoch, args)
 
         save_checkpoint({
             'epoch': epoch + 1,
             'arch': args.arch,
             'state_dict': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
+            'feature_optimizer': feature_optimizer.state_dict(),
+            'classfier_optimizer': classfier_optimizer.state_dict(),
+            'res_optimizer': res_optimizer.state_dict(),
         }, is_best=False, filename='checkpoint_{:04d}.pth.tar'.format(epoch))
         modeltest(args, valid_loader, model, lx, "val")
 
@@ -267,7 +280,8 @@ def modeltest(args, test_loader, model, lx, stage):
 
             inputs = inputs.cuda(args.gpu, non_blocking=True)
             targets = targets.cuda(args.gpu, non_blocking=True)
-            outputs = model(inputs)
+            outputs = model.encoder_q(inputs)
+            outputs = model.classifier(outputs)
             targets = targets.long()
             loss = lx(outputs, targets)
 
@@ -281,7 +295,7 @@ def modeltest(args, test_loader, model, lx, stage):
     return losses.avg, top1.avg
 
 
-def train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, optimizer, epoch, args):
+def train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, feature_optimizer, classfier_optimizer, res_optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -323,31 +337,47 @@ def train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, op
             images[1] = images[1].cuda(args.gpu, non_blocking=True)
             images[2] = images[2].cuda(args.gpu, non_blocking=True)
 
-        # compute output
-        output, target, classout, q_predict, p_predict = model(im_labeled=inputs_x, im_q=images[0], im_k=images[1],
-                                                               im_plabel=images[2])
+        # 有标注损失步骤
+        pred_labeled = model.encoder_q(inputs_x)
+        pred_labeled = model.classifier(pred_labeled)
+        lx_loss = lx(pred_labeled, targets_x.long())
+        feature_optimizer.zero_grad()
+        classfier_optimizer.zero_grad()
+        lx_loss.backward()
+        feature_optimizer.step()
+        classfier_optimizer.step()
 
-        # pseudo_label = torch.softmax(q_predict.detach(), dim=-1)
-        max_probs, target_q = torch.max(p_predict.detach(), dim=-1)
-        mask = max_probs.ge(threshold).float()
-        loss = lx(classout, targets_x.long()) + lamdactv * criterion(output, target) + lamdapseudo * (
-                F.cross_entropy(q_predict, target_q, reduction='none') * mask).mean()
-        # print("lx:"+str(lx(classout, targets_x.long())))
-        # print("ctv:"+str(lamdactv * criterion(output, target)))
-        # print("pse:"+str(lamdapseudo * (F.cross_entropy(q_predict, target_q, reduction='none') * mask).mean()))
-        # print("loss:"+str(loss))
+        # 对比损失步骤
+        output, target = model.contradict_forward(im_q=images[0], im_k=images[1])
+        c_loss = lamdactv * criterion(output, target)
+        feature_optimizer.zero_grad()
+        res_optimizer.zero_grad()
+        c_loss.backward()
+        feature_optimizer.step()
+        res_optimizer.step()
 
-        # acc1/acc5 are (K+1)-way contrast classifier accuracy
-        # measure accuracy and record loss
-        acc1, acc5 = accuracy(classout, targets_x, topk=(1, 5))
+        # 伪标签损失步骤
+        # s_predict = model.encoder_q(images[0])
+        # s_predict = model.classifier(s_predict)
+        # w_predict = model.encoder_q(images[2])
+        # w_predict = model.classifier(w_predict)
+        # max_probs, target_q = torch.max(w_predict.detach(), dim=-1)
+        # mask = max_probs.ge(threshold).float()
+        # p_loss = lamdapseudo * (F.cross_entropy(s_predict, target_q, reduction='none') * mask).mean()
+        # feature_optimizer.zero_grad()
+        # classfier_optimizer.zero_grad()
+        # p_loss.backward()
+        # feature_optimizer.step()
+        # classfier_optimizer.step()
+
+        # 计算及更新准确率
+        # loss = lx_loss + c_loss + p_loss
+        loss = lx_loss + c_loss
+
+        acc1, acc5 = accuracy(pred_labeled, targets_x, topk=(1, 5))
         losses.update(loss.item(), inputs_x.size(0))
         top1.update(acc1[0], inputs_x.size(0))
         top5.update(acc5[0], inputs_x.size(0))
-
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
 
         # measure elapsed time
         batch_time.update(time.time() - end)

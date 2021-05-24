@@ -132,7 +132,7 @@ class Network(nn.Module):
             self.feature_size = self.forward_conv(
                 torch.zeros(*input_shape)).view(-1).shape[0]
 
-        self.fc = nn.Linear(self.feature_size, n_classes)
+        # self.fc = nn.Linear(self.feature_size, n_classes)
 
         # initialize weights
         self.apply(initialize_weights)
@@ -172,5 +172,5 @@ class Network(nn.Module):
     def forward(self, x):
         x = self.forward_conv(x)
         x = x.view(x.size(0), -1)
-        x = self.fc(x)
+        # x = self.fc(x)
         return x
