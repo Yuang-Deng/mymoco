@@ -29,7 +29,7 @@ class MoCo(nn.Module):
         self.encoder_qfc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), nn.Linear(dim_mlp, encoder_config['n_classes']))
         self.encoder_kfc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), nn.Linear(dim_mlp, encoder_config['n_classes']))
 
-        self.classifier = nn.Sequential(nn.Linear(self.encoder_q.feature_size, 10), nn.Softmax(dim=1))
+        self.classifier = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), nn.Linear(dim_mlp, 10), nn.Softmax(dim=1))
         # self.classifier.add_module('d_ln1', nn.Linear(self.encoder_q.feature_size, 10))
         # self.classifier.add_module('d_softmax', nn.Softmax(dim=1))
 
