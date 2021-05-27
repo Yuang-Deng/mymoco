@@ -21,12 +21,6 @@ normal_std = (0.5, 0.5, 0.5)
 
 def get_cifar10(args, root, num_labeled, valid_num):
     simpleTransform = transforms.Compose([
-        # transforms.RandomRotation(45, resample=False, expand=False, center=None),
-        # transforms.ToTensor(),
-        # transforms.Normalize(mean=cifar10_mean,
-        #                      std=cifar10_std)
-        transforms.Resize((32, 32)),
-        # transforms.RandomCrop(border=4, cropsize=(32, 32)),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.ToTensor(),
         transforms.Normalize(cifar10_mean, cifar10_std),
@@ -42,35 +36,9 @@ def get_cifar10(args, root, num_labeled, valid_num):
             transforms.Normalize(mean=cifar10_mean,
                                 std=cifar10_std)
         ])
-    # trans_weak = transforms.Compose([
-    #     transforms.Resize((32, 32)),
-    #     transforms.PadandRandomCrop(border=4, cropsize=(32, 32)),
-    #     transforms.RandomHorizontalFlip(p=0.5),
-    #     transforms.Normalize(mean, std),
-    #     transforms.ToTensor(),
-    # ])
-    # trans_strong0 = transforms.Compose([
-    #     transforms.Resize((32, 32)),
-    #     transforms.PadandRandomCrop(border=4, cropsize=(32, 32)),
-    #     transforms.RandomHorizontalFlip(p=0.5),
-    #     RandomAugment(2, 10),
-    #     transforms.Normalize(mean, std),
-    #     transforms.ToTensor(),
-    # ])
-    # trans_strong1 = transforms.Compose([
-    #     transforms.ToPILImage(),
-    #     transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
-    #     transforms.RandomHorizontalFlip(p=0.5),
-    #     transforms.RandomApply([
-    #         transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
-    #     ], p=0.8),
-    #     transforms.RandomGrayscale(p=0.2),
-    #     transforms.ToTensor(),
-    #     transforms.Normalize(mean, std),
-    # ])
     base_dataset = datasets.CIFAR10(root, train=True, download=False)
 
-    train_labeled_idxs, train_unlabeled_idxs, valid_idxs= my_x_u_split(
+    train_labeled_idxs, train_unlabeled_idxs, valid_idxs = my_x_u_split(
         args, base_dataset.targets, num_labeled=num_labeled, valid_num=valid_num)
 
     train_labeled_dataset = CIFAR10SSL(
@@ -123,6 +91,12 @@ def my_x_u_split(args, labels, num_labeled=4000, valid_num = 5000, num_classes=1
     assert len(labeled_idx) == num_labeled
     temp_idx[labeled_idx] = 1
 
+    p_idx = []
+    for i in range(num_classes):
+        idx = np.where(labels == i and unlabeled_idx == labeled_idx)[0]
+        idx = np.random.choice(idx, 10, False)
+        p_idx.extend((idx))
+
     valid_idx = []
     label_per_class = valid_num // num_classes
     for i in range(num_classes):
@@ -157,7 +131,7 @@ class CIFAR10SSL(datasets.CIFAR10):
         if self.target_transform is not None:
             target = self.target_transform(target)
 
-        return img, target
+        return img, target, index
 
 class GaussianBlur(object):
     """Gaussian blur augmentation in SimCLR https://arxiv.org/abs/2002.05709"""

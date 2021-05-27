@@ -26,10 +26,14 @@ class MoCo(nn.Module):
         self.encoder_k = base_encoder(encoder_config)
 
         dim_mlp = self.encoder_q.feature_size
-        self.encoder_qfc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), nn.Linear(dim_mlp, encoder_config['n_classes']))
-        self.encoder_kfc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), nn.Linear(dim_mlp, encoder_config['n_classes']))
+        self.mocof = encoder_config['n_classes']
+        self.encoder_qfc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(),
+                                         nn.Linear(dim_mlp, encoder_config['n_classes']))
+        self.encoder_kfc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(),
+                                         nn.Linear(dim_mlp, encoder_config['n_classes']))
 
-        self.classifier = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), nn.Linear(dim_mlp, 10), nn.Softmax(dim=1))
+        self.classifier = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), nn.Linear(dim_mlp, 10),
+                                        nn.Softmax(dim=1))
         # self.classifier.add_module('d_ln1', nn.Linear(self.encoder_q.feature_size, 10))
         # self.classifier.add_module('d_softmax', nn.Softmax(dim=1))
 
@@ -72,10 +76,19 @@ class MoCo(nn.Module):
 
         self.queue_ptr[0] = ptr
 
-    def contradict_forward(self, im_q = None, im_k = None):
+    def contradict_forward(self, im_q=None, im_k=None, im_psupcon=None, p_label=None):
         q = self.encoder_q(im_q)
         q = self.encoder_qfc(q)
         q = nn.functional.normalize(q, dim=1)
+        poslen = 0
+        with torch.no_grad():
+            for k, v in im_psupcon.items():
+                poslen = len(v)
+                v = self.encoder_q(v)
+                im_psupcon[k] = self.encoder_qfc(v)
+        supcon_data = torch.empty(size=[len(p_label), poslen, self.mocof]).cuda(0, non_blocking=True)
+        for i in range(len(p_label)):
+            supcon_data[i] = im_psupcon[int(p_label[i])]
 
         with torch.no_grad():
             self._momentum_update_key_encoder()
@@ -85,11 +98,12 @@ class MoCo(nn.Module):
             k = nn.functional.normalize(k, dim=1)
 
         l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
+        l_ppos = torch.einsum('nc,nic->ni', [q, supcon_data])
         # negative logits: NxK
         l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
 
         # logits: Nx(1+K)
-        logits = torch.cat([l_pos, l_neg], dim=1)
+        logits = torch.cat([l_pos, l_ppos, l_neg], dim=1)
 
         # apply temperature
         logits /= self.T
@@ -101,8 +115,6 @@ class MoCo(nn.Module):
         self._dequeue_and_enqueue(k)
 
         return logits, labels
-
-
 
     # def forward(self, im_labeled, im_q=None, im_k=None, im_plabel=None):
     #     if self.training:

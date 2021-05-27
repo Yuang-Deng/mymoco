@@ -15,6 +15,9 @@ import torch.nn as nn
 import torch.nn.parallel
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
+from torch.utils import data
+from torchvision import datasets
+import numpy as np
 import torch.distributed as dist
 import torch.optim
 import torch.multiprocessing as mp
@@ -25,7 +28,6 @@ import torchvision.models as models
 import moco.loader
 import moco.builder
 from moco.wrn import Network
-import cifar
 
 lamdactv = 3
 lamdapseudo = 1
@@ -41,6 +43,7 @@ valid_num = 5000
 momentum = 0.9
 weight_decay = 0
 moco_m = 0.999
+cifar10_class = 10
 # resume = 'checkpoint_0290.pth.tar'
 resume = ''
 model_config = OrderedDict([
@@ -220,25 +223,49 @@ def main_worker(gpu, ngpus_per_node, args):
 
     cudnn.benchmark = True
 
-    labeled_dataset, unlabeled_dataset, valid_dataset, test_dataset = cifar.get_cifar10(args=args, root='datasets',
-                                                                                        num_labeled=num_labeled,
-                                                                                        valid_num=valid_num)
-
+    # 搞数据 先不考虑存储效率
+    base_dataset = moco.loader.CIFAR10SSL('datasets', train=True, download=False, transform=moco.loader.ThreeCropsTransform())
+    labeled_idx, unlabeled_idx, valid_idx, supcon_idx = split_indicies(base_dataset, num_classes=10, num_labeled=num_labeled, num_acl_perclass=10)
+    labeled_sampler = data.sampler.SubsetRandomSampler(labeled_idx)
+    unlabeled_sampler = data.sampler.SubsetRandomSampler(unlabeled_idx)
+    valid_sampler = data.sampler.SubsetRandomSampler(valid_idx)
     labeled_train_loader = torch.utils.data.DataLoader(
-        labeled_dataset, batch_size=batch_size, shuffle=True,
+        base_dataset, batch_size=batch_size, sampler=labeled_sampler,
         pin_memory=True, drop_last=True, num_workers=args.workers)
-
     unlabeled_train_loader = torch.utils.data.DataLoader(
-        unlabeled_dataset, batch_size=batch_size * mu_batch, shuffle=True,
+        base_dataset, batch_size=batch_size, sampler=unlabeled_sampler,
         pin_memory=True, drop_last=True, num_workers=args.workers)
-
     valid_loader = torch.utils.data.DataLoader(
-        valid_dataset, batch_size=batch_size, shuffle=True,
+        base_dataset, batch_size=batch_size, sampler=valid_sampler,
         pin_memory=True, drop_last=True, num_workers=args.workers)
 
-    test_loader = torch.utils.data.DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=True,
-        pin_memory=True, drop_last=True, num_workers=args.workers)
+
+    # labeled_dataset, unlabeled_dataset, valid_dataset, test_dataset = cifar.get_cifar10(args=args, root='datasets',
+    #                                                                                     num_labeled=num_labeled,
+    #                                                                                     valid_num=valid_num)
+    # # p_supcon_sample = {}
+    # # for i in range(10):
+    # #     p_supcon_sample[i] = torch.from_numpy(labeled_dataset.data[labeled_dataset.targets == i][:10]).cuda(args.gpu, non_blocking=True)
+    #
+    # labeled_train_loader = torch.utils.data.DataLoader(
+    #     labeled_dataset, batch_size=batch_size, shuffle=True,
+    #     pin_memory=True, drop_last=True, num_workers=args.workers)
+    #
+    # # p_supcon_sample = {}
+    # # for i in range(10):
+    # #     p_supcon_sample[i] = torch.from_numpy(labeled_train_loader.dataset.data[labeled_train_loader.dataset.targets == i][:10]).cuda(args.gpu, non_blocking=True)
+    #
+    # unlabeled_train_loader = torch.utils.data.DataLoader(
+    #     unlabeled_dataset, batch_size=batch_size * mu_batch, shuffle=True,
+    #     pin_memory=True, drop_last=True, num_workers=args.workers)
+    #
+    # valid_loader = torch.utils.data.DataLoader(
+    #     valid_dataset, batch_size=batch_size, shuffle=True,
+    #     pin_memory=True, drop_last=True, num_workers=args.workers)
+    #
+    # test_loader = torch.utils.data.DataLoader(
+    #     test_dataset, batch_size=batch_size, shuffle=True,
+    #     pin_memory=True, drop_last=True, num_workers=args.workers)
 
     for epoch in range(args.start_epoch, epochs):
         adjust_learning_rate(feature_optimizer, epoch, args)
@@ -246,7 +273,7 @@ def main_worker(gpu, ngpus_per_node, args):
         adjust_learning_rate(res_optimizer, epoch, args)
 
         # train for one epoch
-        train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, feature_optimizer, classfier_optimizer, res_optimizer, epoch, args)
+        train(base_dataset, labeled_train_loader, unlabeled_train_loader, model, criterion, lx, feature_optimizer, classfier_optimizer, res_optimizer, epoch, args, supcon_idx)
 
         save_checkpoint({
             'epoch': epoch + 1,
@@ -295,7 +322,7 @@ def modeltest(args, test_loader, model, lx, stage):
     return losses.avg, top1.avg
 
 
-def train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, feature_optimizer, classfier_optimizer, res_optimizer, epoch, args):
+def train(basedataset, labeled_train_loader, unlabeled_train_loader, model, criterion, lx, feature_optimizer, classfier_optimizer, res_optimizer, epoch, args, supcon_idx):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -310,28 +337,37 @@ def train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, fe
     model.train()
 
     end = time.time()
-    # labeled_iter = iter(labeled_train_loader)
+    supcon_sampler = data.sampler.SubsetRandomSampler(supcon_idx)
+    supcon_loader = torch.utils.data.DataLoader(
+        basedataset, batch_size=len(supcon_idx), sampler=supcon_sampler,
+        pin_memory=True, drop_last=True, num_workers=args.workers)
+    supcon_data, supcon_target, supcon_index = supcon_loader.__iter__().next()
+    supcon_data = supcon_data[2]
+    supcon_class_dict = {}
+    for i in range(cifar10_class):
+        supcon_class_dict[i] = supcon_data[supcon_target == i].cuda(args.gpu, non_blocking=True)
+
     labeled_iter = labeled_train_loader.__iter__()
     unlabeled_iter = unlabeled_train_loader.__iter__()
     for i in range(eval_step):
         # measure data loading time
         data_time.update(time.time() - end)
         try:
-            inputs_x, targets_x = labeled_iter.next()
+            inputs_x, targets_x, labeled_idx = labeled_iter.next()
         except:
             # print("label over")
             labeled_iter = labeled_train_loader.__iter__()
-            inputs_x, targets_x = labeled_iter.next()
+            inputs_x, targets_x, labeled_idx = labeled_iter.next()
 
         try:
-            images, _ = unlabeled_iter.next()
+            images, _, unlabled_idx = unlabeled_iter.next()
         except:
             # print("unlabel over")
             unlabeled_iter = unlabeled_train_loader.__iter__()
-            images, _ = unlabeled_iter.next()
+            images, _, unlabled_idx = unlabeled_iter.next()
 
         if args.gpu is not None:
-            inputs_x = inputs_x.cuda(args.gpu, non_blocking=True)
+            inputs_x = inputs_x[2].cuda(args.gpu, non_blocking=True)
             targets_x = targets_x.cuda(args.gpu, non_blocking=True)
             images[0] = images[0].cuda(args.gpu, non_blocking=True)
             images[1] = images[1].cuda(args.gpu, non_blocking=True)
@@ -347,15 +383,6 @@ def train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, fe
         feature_optimizer.step()
         classfier_optimizer.step()
 
-        # 对比损失步骤
-        output, target = model.contradict_forward(im_q=images[0], im_k=images[1])
-        c_loss = lamdactv * criterion(output, target)
-        feature_optimizer.zero_grad()
-        res_optimizer.zero_grad()
-        c_loss.backward()
-        feature_optimizer.step()
-        res_optimizer.step()
-
         # 伪标签损失步骤
         s_predict = model.encoder_q(images[0])
         s_predict = model.classifier(s_predict)
@@ -369,6 +396,21 @@ def train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, fe
         p_loss.backward()
         feature_optimizer.step()
         classfier_optimizer.step()
+
+        # 对比损失步骤
+        # 组织数据
+        # sc_data = torch.empty(size=[len(target_q),3,32,32])
+        # for i in range(len(target_q)):
+        #     sc_data[i] = supcon_class_dict[int(target_q[i])]
+
+        output, target = model.contradict_forward(im_q=images[0], im_k=images[1], im_psupcon=supcon_class_dict, p_label=target_q)
+        c_loss = lamdactv * criterion(output, target)
+        target = target + 1
+        feature_optimizer.zero_grad()
+        res_optimizer.zero_grad()
+        c_loss.backward()
+        feature_optimizer.step()
+        res_optimizer.step()
 
         # 计算及更新准确率
         loss = lx_loss + c_loss + p_loss
@@ -464,6 +506,38 @@ def accuracy(output, target, topk=(1,)):
             correct_k = correct[:k].contiguous().view(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
+
+def split_indicies(dataset, num_classes=10 ,num_labeled=4000, valid_num = 5000, num_acl_perclass=10):
+    labels = dataset.targets
+    label_per_class = num_labeled // num_classes
+    labels = np.array(labels)
+    temp_idx = np.zeros(len(labels))
+    labeled_idx = []
+    # unlabeled data: all data (https://github.com/kekmodel/FixMatch-pytorch/issues/10)
+    unlabeled_idx = np.array(range(len(labels)))
+    supcon_idx = []
+    for i in range(num_classes):
+        idx = np.where(labels == i)[0]
+        lidx = np.random.choice(idx, label_per_class, False)
+        labeled_idx.extend(lidx)
+        supconidx = np.random.choice(idx, num_acl_perclass, False)
+        supcon_idx.extend(supconidx)
+    labeled_idx = np.array(labeled_idx)
+    supcon_idx = np.array(supcon_idx)
+    assert len(labeled_idx) == num_labeled
+    temp_idx[labeled_idx] = 1
+
+    valid_idx = []
+    label_per_class = valid_num // num_classes
+    for i in range(num_classes):
+        idx = np.where(temp_idx[labels == i] == 0)[0]
+        idx = np.random.choice(idx, label_per_class, False)
+        valid_idx.extend(idx)
+    valid_idx = np.array(valid_idx)
+
+    np.random.shuffle(labeled_idx)
+    unlabeled_idx = np.delete(unlabeled_idx, valid_idx)
+    return labeled_idx, unlabeled_idx, valid_idx, supcon_idx
 
 
 if __name__ == '__main__':
