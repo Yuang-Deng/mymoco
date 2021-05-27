@@ -41,6 +41,7 @@ valid_num = 6000
 momentum = 0.9
 weight_decay = 0
 moco_m = 0.999
+T = 1
 # resume = 'checkpoint_0290.pth.tar'
 resume = ''
 model_config = OrderedDict([
@@ -357,22 +358,23 @@ def train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, fe
         res_optimizer.step()
 
         # 伪标签损失步骤
-        # s_predict = model.encoder_q(images[0])
-        # s_predict = model.classifier(s_predict)
-        # w_predict = model.encoder_q(images[2])
-        # w_predict = model.classifier(w_predict)
-        # max_probs, target_q = torch.max(w_predict.detach(), dim=-1)
-        # mask = max_probs.ge(threshold).float()
-        # p_loss = lamdapseudo * (F.cross_entropy(s_predict, target_q, reduction='none') * mask).mean()
-        # feature_optimizer.zero_grad()
-        # classfier_optimizer.zero_grad()
-        # p_loss.backward()
-        # feature_optimizer.step()
-        # classfier_optimizer.step()
+        s_predict = model.encoder_q(images[0])
+        s_predict = model.classifier(s_predict)
+        w_predict = model.encoder_q(images[2])
+        w_predict = model.classifier(w_predict)
+        pseudo_label = torch.softmax(w_predict.detach() / T, dim=-1)
+        max_probs, target_q = torch.max(pseudo_label, dim=-1)
+        mask = max_probs.ge(threshold).float()
+        p_loss = lamdapseudo * (F.cross_entropy(s_predict, target_q, reduction='none') * mask).mean()
+        feature_optimizer.zero_grad()
+        classfier_optimizer.zero_grad()
+        p_loss.backward()
+        feature_optimizer.step()
+        classfier_optimizer.step()
 
         # 计算及更新准确率
-        # loss = lx_loss + c_loss + p_loss
-        loss = lx_loss + c_loss
+        loss = lx_loss + c_loss + p_loss
+        # loss = lx_loss + c_loss
 
         acc1, acc5 = accuracy(pred_labeled, targets_x, topk=(1, 5))
         losses.update(loss.item(), inputs_x.size(0))
