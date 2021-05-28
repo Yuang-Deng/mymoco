@@ -37,7 +37,7 @@ eval_step = 80
 moco_k = mu_batch * 100 * batch_size
 threshold = 0.99
 num_labeled = 4000
-valid_num = 6000
+valid_num = 5000
 momentum = 0.9
 weight_decay = 0
 moco_m = 0.999
@@ -362,8 +362,10 @@ def train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, fe
         s_predict = model.classifier(s_predict)
         w_predict = model.encoder_q(images[2])
         w_predict = model.classifier(w_predict)
+
         pseudo_label = torch.softmax(w_predict.detach() / T, dim=-1)
         max_probs, target_q = torch.max(pseudo_label, dim=-1)
+
         mask = max_probs.ge(threshold).float()
         p_loss = lamdapseudo * (F.cross_entropy(s_predict, target_q, reduction='none') * mask).mean()
         feature_optimizer.zero_grad()
