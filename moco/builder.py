@@ -32,8 +32,7 @@ class MoCo(nn.Module):
         self.encoder_kfc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(),
                                          nn.Linear(dim_mlp, encoder_config['n_classes']))
 
-        self.classifier = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), nn.Linear(dim_mlp, 10),
-                                        nn.Softmax(dim=1))
+        self.classifier = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), nn.Linear(dim_mlp, 10))
         # self.classifier.add_module('d_ln1', nn.Linear(self.encoder_q.feature_size, 10))
         # self.classifier.add_module('d_softmax', nn.Softmax(dim=1))
 
@@ -81,14 +80,15 @@ class MoCo(nn.Module):
         q = self.encoder_qfc(q)
         q = nn.functional.normalize(q, dim=1)
         poslen = 0
+        supdata = {}
         with torch.no_grad():
             for k, v in im_psupcon.items():
                 poslen = len(v)
-                v = self.encoder_q(v)
-                im_psupcon[k] = self.encoder_qfc(v)
+                supdata[k] = self.encoder_q(v)
+                supdata[k] = self.encoder_qfc(supdata[k] )
         supcon_data = torch.empty(size=[len(p_label), poslen, self.mocof]).cuda(0, non_blocking=True)
         for i in range(len(p_label)):
-            supcon_data[i] = im_psupcon[int(p_label[i])]
+            supcon_data[i] = supdata[int(p_label[i])]
 
         with torch.no_grad():
             self._momentum_update_key_encoder()

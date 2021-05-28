@@ -44,6 +44,8 @@ momentum = 0.9
 weight_decay = 0
 moco_m = 0.999
 cifar10_class = 10
+num_acl_perclass = 10
+T = 1
 # resume = 'checkpoint_0290.pth.tar'
 resume = ''
 model_config = OrderedDict([
@@ -225,7 +227,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # 搞数据 先不考虑存储效率
     base_dataset = moco.loader.CIFAR10SSL('datasets', train=True, download=False, transform=moco.loader.ThreeCropsTransform())
-    labeled_idx, unlabeled_idx, valid_idx, supcon_idx = split_indicies(base_dataset, num_classes=10, num_labeled=num_labeled, num_acl_perclass=10)
+    labeled_idx, unlabeled_idx, valid_idx, supcon_idx = split_indicies(base_dataset, num_classes=10, num_labeled=num_labeled, num_acl_perclass=num_acl_perclass)
     labeled_sampler = data.sampler.SubsetRandomSampler(labeled_idx)
     unlabeled_sampler = data.sampler.SubsetRandomSampler(unlabeled_idx)
     valid_sampler = data.sampler.SubsetRandomSampler(valid_idx)
@@ -301,11 +303,11 @@ def modeltest(args, test_loader, model, lx, stage):
     end = time.time()
 
     with torch.no_grad():
-        for batch_idx, (inputs, targets) in enumerate(test_loader):
+        for batch_idx, (inputs, targets, _) in enumerate(test_loader):
             data_time.update(time.time() - end)
             model.eval()
 
-            inputs = inputs.cuda(args.gpu, non_blocking=True)
+            inputs = inputs[2].cuda(args.gpu, non_blocking=True)
             targets = targets.cuda(args.gpu, non_blocking=True)
             outputs = model.encoder_q(inputs)
             outputs = model.classifier(outputs)
@@ -388,7 +390,8 @@ def train(basedataset, labeled_train_loader, unlabeled_train_loader, model, crit
         s_predict = model.classifier(s_predict)
         w_predict = model.encoder_q(images[2])
         w_predict = model.classifier(w_predict)
-        max_probs, target_q = torch.max(w_predict.detach(), dim=-1)
+        pseudo_label = torch.softmax(w_predict.detach() / T, dim=-1)
+        max_probs, target_q = torch.max(pseudo_label, dim=-1)
         mask = max_probs.ge(threshold).float()
         p_loss = lamdapseudo * (F.cross_entropy(s_predict, target_q, reduction='none') * mask).mean()
         feature_optimizer.zero_grad()
@@ -404,8 +407,12 @@ def train(basedataset, labeled_train_loader, unlabeled_train_loader, model, crit
         #     sc_data[i] = supcon_class_dict[int(target_q[i])]
 
         output, target = model.contradict_forward(im_q=images[0], im_k=images[1], im_psupcon=supcon_class_dict, p_label=target_q)
+        # c_loss = 0
+        # for x in range(num_acl_perclass):
+        #     c_loss += lamdactv * criterion(output, target)
+        #     target = target + 1
+        # c_loss = c_loss / (num_acl_perclass+1)
         c_loss = lamdactv * criterion(output, target)
-        target = target + 1
         feature_optimizer.zero_grad()
         res_optimizer.zero_grad()
         c_loss.backward()
