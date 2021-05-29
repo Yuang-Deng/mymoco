@@ -21,21 +21,44 @@ import torch.multiprocessing as mp
 import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.models as models
+import logging
 
 import moco.loader
 import moco.builder
 from moco.wrn import Network
 import cifar
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
 
-lamdactv = 3
-lamdapseudo = 1
+def get_logger(filename, verbosity=1, name=None):
+    level_dict = {0: logging.DEBUG, 1: logging.INFO, 2: logging.WARNING}
+    formatter = logging.Formatter(
+        "%(message)s"
+    )
+    logger = logging.getLogger(name)
+    logger.setLevel(level_dict[verbosity])
+
+    fh = logging.FileHandler(filename, "w")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+
+    sh = logging.StreamHandler()
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+
+    return logger
+logger = get_logger('./mytest/log.txt')
+
+
+lamdactv = 2
+lamdapseudo = 2
 mu_batch = 8
-lrate = 1e-1
+lrate = 5e-2
 batch_size = 128
 epochs = 200
 eval_step = 80
 moco_k = mu_batch * 100 * batch_size
-threshold = 0.99
+threshold = 0.9
 num_labeled = 4000
 valid_num = 5000
 momentum = 0.9
@@ -129,7 +152,7 @@ parser.add_argument('--cos', action='store_true',
                     help='use cosine lr schedule')
 
 
-def main():
+def main(writer):
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -161,10 +184,10 @@ def main():
         mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
     else:
         # Simply call main_worker function
-        main_worker(args.gpu, ngpus_per_node, args)
+        main_worker(args.gpu, ngpus_per_node, args, writer)
 
 
-def main_worker(gpu, ngpus_per_node, args):
+def main_worker(gpu, ngpus_per_node, args, writer):
     args.gpu = gpu
 
     if args.gpu is not None:
@@ -176,7 +199,6 @@ def main_worker(gpu, ngpus_per_node, args):
     model = moco.builder.MoCo(
         Network, model_config,
         moco_k, moco_m, args.moco_t, args.mlp)
-    print(model)
 
     if args.gpu is not None:
         torch.cuda.set_device(args.gpu)
@@ -247,22 +269,22 @@ def main_worker(gpu, ngpus_per_node, args):
         adjust_learning_rate(res_optimizer, epoch, args)
 
         # train for one epoch
-        train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, feature_optimizer, classfier_optimizer, res_optimizer, epoch, args)
+        train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, feature_optimizer, classfier_optimizer, res_optimizer, epoch, args, writer)
 
-        save_checkpoint({
-            'epoch': epoch + 1,
-            'arch': args.arch,
-            'state_dict': model.state_dict(),
-            'feature_optimizer': feature_optimizer.state_dict(),
-            'classfier_optimizer': classfier_optimizer.state_dict(),
-            'res_optimizer': res_optimizer.state_dict(),
-        }, is_best=False, filename='checkpoint_{:04d}.pth.tar'.format(epoch))
-        modeltest(args, valid_loader, model, lx, "val")
+        # save_checkpoint({
+        #     'epoch': epoch + 1,
+        #     'arch': args.arch,
+        #     'state_dict': model.state_dict(),
+        #     'feature_optimizer': feature_optimizer.state_dict(),
+        #     'classfier_optimizer': classfier_optimizer.state_dict(),
+        #     'res_optimizer': res_optimizer.state_dict(),
+        # }, is_best=False, filename='checkpoint_{:04d}.pth.tar'.format(epoch))
+        modeltest(args, valid_loader, model, lx, "val", epoch, writer)
 
     # modeltest(args, test_loader, model, lx, "test")
 
 
-def modeltest(args, test_loader, model, lx, stage):
+def modeltest(args, test_loader, model, lx, stage, epoch, writer):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -293,10 +315,12 @@ def modeltest(args, test_loader, model, lx, stage):
             batch_time.update(time.time() - end)
             end = time.time()
     progress.display(len(test_loader))
+    writer.add_scalar('loss/testloss', losses.avg, epoch)
+    writer.add_scalar('acc/testacc', top1.avg, epoch)
     return losses.avg, top1.avg
 
 
-def train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, feature_optimizer, classfier_optimizer, res_optimizer, epoch, args):
+def train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, feature_optimizer, classfier_optimizer, res_optimizer, epoch, args, writer):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -387,8 +411,11 @@ def train(labeled_train_loader, unlabeled_train_loader, model, criterion, lx, fe
         batch_time.update(time.time() - end)
         end = time.time()
 
+        writer.add_scalar('loss/trainloss', losses.avg, epoch * eval_step + i)
+        writer.add_scalar('acc/trainacc', top1.avg, epoch * eval_step + i)
         if i % args.print_freq == 0:
             progress.display(i)
+
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
@@ -431,7 +458,8 @@ class ProgressMeter(object):
     def display(self, batch):
         entries = [self.prefix + self.batch_fmtstr.format(batch)]
         entries += [str(meter) for meter in self.meters]
-        print('\t'.join(entries))
+        # print('\t'.join(entries))
+        logger.info('\t'.join(entries))
 
     def _get_batch_fmtstr(self, num_batches):
         num_digits = len(str(num_batches // 1))
@@ -469,4 +497,6 @@ def accuracy(output, target, topk=(1,)):
 
 
 if __name__ == '__main__':
-    main()
+    TIMESTAMP = "{0:%Y-%m-%dT%H-%M-%S/}".format(datetime.now())
+    writer = SummaryWriter('./log'+str(TIMESTAMP))
+    main(writer)

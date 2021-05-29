@@ -1,3 +1,7 @@
 checkpoint*
 datasets/*
 .idea
+log*
+mytest/log.txt
+mytest/acc.txt
+mytest/mtest.py
