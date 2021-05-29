@@ -1,3 +1,8 @@
 checkpoint*
 datasets/*
 .idea
+log*
+mytest/acc.txt
+mytest/log.txt
+.vscode
+.idea

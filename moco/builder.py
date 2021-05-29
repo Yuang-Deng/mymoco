@@ -85,7 +85,7 @@ class MoCo(nn.Module):
             for k, v in im_psupcon.items():
                 poslen = len(v)
                 supdata[k] = self.encoder_q(v)
-                supdata[k] = self.encoder_qfc(supdata[k] )
+                supdata[k] = self.encoder_qfc(supdata[k])
         supcon_data = torch.empty(size=[len(p_label), poslen, self.mocof]).cuda(0, non_blocking=True)
         for i in range(len(p_label)):
             supcon_data[i] = supdata[int(p_label[i])]
