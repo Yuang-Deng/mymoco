@@ -97,6 +97,7 @@ class MoCo(nn.Module):
             k = self.encoder_kfc(k)
             k = nn.functional.normalize(k, dim=1)
 
+        supcon_data = torch.cat([k,supcon_data],dim=1)
         l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
         l_ppos = torch.einsum('nc,nic->ni', [q, supcon_data])
         # negative logits: NxK
@@ -110,6 +111,56 @@ class MoCo(nn.Module):
 
         # labels: positive key indicators
         labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
+        # pos_labels = torch.zeros([logits.shape[0], poslen + 1], dtype=torch.long).cuda()
+        # neg_labels = torch.ones([logits.shape[0], len(l_neg[0])], dtype=torch.long).cuda()
+        # labels = torch.cat([pos_labels, neg_labels], dim=1)
+
+        # dequeue and enqueue
+        self._dequeue_and_enqueue(k)
+
+        return logits, labels
+
+    def contradict_forward_new(self, im_q=None, im_k=None, im_psupcon=None, p_label=None):
+        q = self.encoder_q(im_q)
+        q = self.encoder_qfc(q)
+        q = nn.functional.normalize(q, dim=1)
+        poslen = 0
+        supdata = {}
+        with torch.no_grad():
+            for k, v in im_psupcon.items():
+                poslen = len(v)
+                supdata[k] = self.encoder_q(v)
+                supdata[k] = self.encoder_qfc(supdata[k])
+        supcon_data = torch.empty(size=[len(p_label), poslen, self.mocof]).cuda(0, non_blocking=True)
+        for i in range(len(p_label)):
+            supcon_data[i] = supdata[int(p_label[i])]
+
+        with torch.no_grad():
+            self._momentum_update_key_encoder()
+
+            k = self.encoder_k(im_k)
+            k = self.encoder_kfc(k)
+            k = nn.functional.normalize(k, dim=1)
+
+        pos_data = torch.cat([k, supcon_data], dim=1)
+        l_pos = torch.einsum('nc,nic->ni', [q, pos_data])
+        # negative logits: NxK
+        l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
+
+        # logits: Nx(1+K)
+        logits = []
+        for i in range(poslen+1):
+            l_p = l_pos[:, 1]
+            logits.append(torch.cat([l_p, l_neg], dim=1))
+
+        # apply temperature
+        logits /= self.T
+
+        # labels: positive key indicators
+        labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
+        # pos_labels = torch.zeros([logits.shape[0], poslen + 1], dtype=torch.long).cuda()
+        # neg_labels = torch.ones([logits.shape[0], len(l_neg[0])], dtype=torch.long).cuda()
+        # labels = torch.cat([pos_labels, neg_labels], dim=1)
 
         # dequeue and enqueue
         self._dequeue_and_enqueue(k)

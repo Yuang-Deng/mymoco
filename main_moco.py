@@ -29,6 +29,7 @@ import logging
 import moco.loader
 import moco.builder
 from moco.wrn import Network
+from  moco.losses import SupConLoss
 import cifar
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
@@ -302,14 +303,14 @@ def main_worker(gpu, ngpus_per_node, args, writer):
         # train for one epoch
         train(base_dataset, labeled_train_loader, unlabeled_train_loader, model, criterion, lx, feature_optimizer, classfier_optimizer, res_optimizer, epoch, args, supcon_idx, writer)
 
-        save_checkpoint({
-            'epoch': epoch + 1,
-            'arch': args.arch,
-            'state_dict': model.state_dict(),
-            'feature_optimizer': feature_optimizer.state_dict(),
-            'classfier_optimizer': classfier_optimizer.state_dict(),
-            'res_optimizer': res_optimizer.state_dict(),
-        }, is_best=False, filename='checkpoint_{:04d}.pth.tar'.format(epoch))
+        # save_checkpoint({
+        #     'epoch': epoch + 1,
+        #     'arch': args.arch,
+        #     'state_dict': model.state_dict(),
+        #     'feature_optimizer': feature_optimizer.state_dict(),
+        #     'classfier_optimizer': classfier_optimizer.state_dict(),
+        #     'res_optimizer': res_optimizer.state_dict(),
+        # }, is_best=False, filename='checkpoint_{:04d}.pth.tar'.format(epoch))
         modeltest(args, valid_loader, model, lx, "val", epoch, writer)
 
     # modeltest(args, test_loader, model, lx, "test")
@@ -434,12 +435,13 @@ def train(basedataset, labeled_train_loader, unlabeled_train_loader, model, crit
         #     sc_data[i] = supcon_class_dict[int(target_q[i])]
 
         output, target = model.contradict_forward(im_q=images[0], im_k=images[1], im_psupcon=supcon_class_dict, p_label=target_q)
-        # c_loss = 0
-        # for x in range(num_acl_perclass):
-        #     c_loss += lamdactv * criterion(output, target)
-        #     target = target + 1
-        # c_loss = c_loss / (num_acl_perclass+1)
-        c_loss = lamdactv * criterion(output, target)
+        c_loss = 0
+        for out in output:
+            c_loss += lamdactv * criterion(out, target)
+        # c_loss = c_loss / (len(output))
+        c_loss = lamdactv * (c_loss / (len(output)))
+        # criterion = SupConLoss()
+        # c_loss = lamdactv * criterion(output, target)
         feature_optimizer.zero_grad()
         res_optimizer.zero_grad()
         c_loss.backward()
