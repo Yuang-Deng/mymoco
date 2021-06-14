@@ -216,13 +216,13 @@ def main_worker(gpu, ngpus_per_node, args, writer):
         criterion = criterion.cuda(args.gpu)
 
 
-    feature_optimizer = torch.optim.SGD(model.encoder_q.parameters(), lrate,
+    feature_optimizer = torch.optim.SGD(model.encoder_q.parameters(), lrate,#encoder 的优化器
                                 momentum=momentum,
                                 weight_decay=weight_decay)
-    classfier_optimizer = torch.optim.SGD(model.classifier.parameters(), lrate,
+    classfier_optimizer = torch.optim.SGD(model.classifier.parameters(), lrate,#有监督学习分类器 伪标签分类 的优化器
                                     momentum=momentum,
                                     weight_decay=weight_decay)
-    res_optimizer = torch.optim.SGD(model.encoder_qfc.parameters(), lrate,
+    res_optimizer = torch.optim.SGD(model.encoder_qfc.parameters(), lrate,#moco的fc层 的优化器
                                     momentum=momentum,
                                     weight_decay=weight_decay)
 
@@ -429,19 +429,11 @@ def train(basedataset, labeled_train_loader, unlabeled_train_loader, model, crit
         classfier_optimizer.step()
 
         # 对比损失步骤
-        # 组织数据
-        # sc_data = torch.empty(size=[len(target_q),3,32,32])
-        # for i in range(len(target_q)):
-        #     sc_data[i] = supcon_class_dict[int(target_q[i])]
-
-        output, target = model.contradict_forward(im_q=images[0], im_k=images[1], im_psupcon=supcon_class_dict, p_label=target_q)
+        output, target = model.contradict_forward_new(im_q=images[0], im_k=images[1], im_psupcon=supcon_class_dict, p_label=target_q)
         c_loss = 0
         for out in output:
             c_loss += lamdactv * criterion(out, target)
-        # c_loss = c_loss / (len(output))
         c_loss = lamdactv * (c_loss / (len(output)))
-        # criterion = SupConLoss()
-        # c_loss = lamdactv * criterion(output, target)
         feature_optimizer.zero_grad()
         res_optimizer.zero_grad()
         c_loss.backward()

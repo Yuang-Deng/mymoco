@@ -97,8 +97,9 @@ class MoCo(nn.Module):
             k = self.encoder_kfc(k)
             k = nn.functional.normalize(k, dim=1)
 
-        supcon_data = torch.cat([k,supcon_data],dim=1)
-        l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
+        supcon_data = torch.cat([k, supcon_data], dim=1)
+        l_pos = torch.einsum('nc,nc->n', [q, k])
+        l_pos = l_pos.unsqueeze(-1)
         l_ppos = torch.einsum('nc,nic->ni', [q, supcon_data])
         # negative logits: NxK
         l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
@@ -141,6 +142,7 @@ class MoCo(nn.Module):
             k = self.encoder_k(im_k)
             k = self.encoder_kfc(k)
             k = nn.functional.normalize(k, dim=1)
+            k = k.view(128, -1, 128)
 
         pos_data = torch.cat([k, supcon_data], dim=1)
         l_pos = torch.einsum('nc,nic->ni', [q, pos_data])
